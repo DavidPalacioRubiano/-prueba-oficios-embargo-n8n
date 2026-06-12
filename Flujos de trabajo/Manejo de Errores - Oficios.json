@@ -1,0 +1,56 @@
+{
+  "name": "Manejo de Errores - Oficios",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "d65832ad-9b09-4f82-bdbf-75af36e9b1cd",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === REGISTRO DE ERRORES ===\nerror_data = _items[0][\"json\"]\n\nregistro_error = {\n    \"error_event\": \"Fallo en el procesamiento del oficio\",\n    \"workflow\": error_data.get(\"workflow\", {}).get(\"name\", \"N/D\"),\n    \"error_message\": error_data.get(\"execution\", {}).get(\"error\", {}).get(\"message\", \"Error desconocido\"),\n    \"node\": error_data.get(\"execution\", {}).get(\"error\", {}).get(\"node\", {}).get(\"name\", \"N/D\"),\n    \"timestamp\": error_data.get(\"execution\", {}).get(\"lastNodeExecuted\", \"N/D\"),\n    \"status\": \"error_logged\",\n}\n\nreturn [{\"json\": registro_error}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "64a4c837-88b0-4e12-9ea5-e22895fbad63",
+      "name": "Code in Python"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in Python",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "7be1c006-86a0-497f-949d-b529caa3f6cb",
+  "meta": {
+    "instanceId": "7ed99981de0f98a25e6b7398256acefda7c5d834300494d29fc75c64d502335b"
+  },
+  "nodeGroups": [],
+  "id": "cBnU6JiyD8q7JxFn",
+  "tags": []
+}

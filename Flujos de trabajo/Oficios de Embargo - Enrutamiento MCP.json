@@ -1,0 +1,488 @@
+{
+  "name": "Oficios de Embargo - Enrutamiento MCP",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "oficio-embargo",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "8006180b-de54-4988-b04f-df5d5cb5adfa",
+      "name": "Webhook",
+      "webhookId": "67626e24-cc4f-4450-812e-e2d977496a9f"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "33310c61-cba8-428f-ab5b-0670646d38ca",
+              "leftValue": "={{ $json.validation.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        416,
+        0
+      ],
+      "id": "5bf3fe5f-2d79-4d13-811d-877bb464564e",
+      "name": "Si Json está completo"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === VALIDACIÓN DE CAMPOS CRÍTICOS ===\n# Tomamos el body que llegó del webhook (primer item)\ndata = _items[0][\"json\"][\"body\"]\n\n# Campos críticos\ncampos_criticos = [\n    \"case_id\",\n    \"requester_name\",\n    \"requester_email\",\n    \"area\",\n    \"process_name\",\n    \"document_type\",\n    \"description\",\n    \"current_solution\",\n    \"has_api_available\",\n    \"requires_human_approval\",\n    \"uses_sensitive_data\",\n]\n\n# Detectar cuales faltan o vienen vacíos\ncampos_faltantes = []\nfor campo in campos_criticos:\n    valor = data.get(campo)\n    \n    if valor is None or valor == \"\":\n        campos_faltantes.append(campo)\n\nes_valido = len(campos_faltantes) == 0\n\n# Retorno de Validación\nreturn [\n    {\n        \"json\": {\n            **data,\n            \"validation\": {\n                \"valid\": es_valido,\n                \"missing_fields\": campos_faltantes,\n            },\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "82824087-1e9e-4964-b7e7-4c5dee5e6998",
+      "name": "Verificar campos Json "
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === ENRIQUECIMIENTO DEL CASO ===\ndata = _items[0][\"json\"]\n\n# 1. case_type: tipo de medida judicial\n# Derivado del campo document_type o description.\ntexto = (str(data.get(\"document_type\", \"\")) + \" \" + str(data.get(\"description\", \"\"))).lower()\n\nif \"desembargo\" in texto:\n    case_type = \"desembargo\"\nelif \"levantamiento\" in texto:\n    case_type = \"levantamiento\"\nelif \"retencion\" in texto or \"retención\" in texto:\n    case_type = \"retencion\"\nelif \"embargo\" in texto:\n    case_type = \"embargo\"\nelse:\n    case_type = \"revision\"\n\n# 2. jurisdiction: judicial, administrativa o interna\nif \"judicial\" in texto or \"juzgado\" in texto:\n    jurisdiction = \"judicial\"\nelif \"administrativa\" in texto or \"entidad\" in texto:\n    jurisdiction = \"administrativa\"\nelse:\n    jurisdiction = \"interna\"\n\n# 3. recommended_owner: a quién enrutar\n# Si requiere aprobación humana o datos sensibles, va a legal/cumplimiento.\nif data.get(\"requires_human_approval\") or data.get(\"uses_sensitive_data\"):\n    recommended_owner = \"legal\"\nelif data.get(\"regulatory_urgency\"):\n    recommended_owner = \"cumplimiento\"\nelse:\n    recommended_owner = \"operacion\"\n\n# 4. priority_reason: explicación breve \nrazones = []\nif data.get(\"regulatory_urgency\"):\n    razones.append(\"urgencia regulatoria\")\nif data.get(\"uses_sensitive_data\"):\n    razones.append(\"datos sensibles\")\nif data.get(\"requires_human_approval\"):\n    razones.append(\"requiere aprobación humana\")\nif isinstance(data.get(\"monthly_volume\"), (int, float)) and data.get(\"monthly_volume\") >= 200:\n    razones.append(\"alto volumen mensual\")\n\npriority_reason = \", \".join(razones) if razones else \"sin factores de prioridad relevantes\"\n\n# Devolver el caso enriquecido \ndata[\"enrichment\"] = {\n    \"case_type\": case_type,\n    \"jurisdiction\": jurisdiction,\n    \"recommended_owner\": recommended_owner,\n    \"priority_reason\": priority_reason,\n}\n\nreturn [{\"json\": data}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        -96
+      ],
+      "id": "ef710824-bf49-46ee-a466-153ce99dc441",
+      "name": "Enrequecimiento del caso"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === CLASIFICACIÓN TECNOLÓGICA ===\ndata = _items[0][\"json\"]\n\nrequiere_aprobacion = bool(data.get(\"requires_human_approval\"))\ndatos_sensibles = bool(data.get(\"uses_sensitive_data\"))\nurgencia_regulatoria = bool(data.get(\"regulatory_urgency\"))\nhay_api = bool(data.get(\"has_api_available\"))\nvolumen = data.get(\"monthly_volume\") or 0\nsolucion_actual = str(data.get(\"current_solution\", \"\")).lower()\ndescripcion = str(data.get(\"description\", \"\")).lower()\n\n# Detectar si el caso menciona cálculo o lógica compleja\nindicios_calculo = any(p in descripcion for p in [\"cálculo\", \"calculo\", \"complej\", \"especializ\", \"liquidación\", \"liquidacion\"])\n\n# --- Árbol de decisión ---\n# 1. Appian: apertura formal, aprobaciones, trazabilidad legal.\nif requiere_aprobacion and (datos_sensibles or urgencia_regulatoria):\n    plataforma = \"Appian\"\n    motivo = \"Requiere apertura formal de caso, aprobación humana y trazabilidad legal por datos sensibles o urgencia regulatoria.\"\n\n# 2. Microservicio: SOLO si hay lógica/cálculo diferenciador y complejo.\nelif indicios_calculo:\n    plataforma = \"Microservicio\"\n    motivo = \"Requiere lógica diferenciadora o cálculo especializado que amerita una solución robusta y escalable.\"\n\n# 3. RPA Selectivo: opera sobre RPA y NO hay API (UI legacy sin alternativa).\nelif solucion_actual == \"rpa\" and not hay_api:\n    plataforma = \"RPA Selectivo\"\n    motivo = \"El caso opera sobre interfaz legacy sin API disponible; solo se mantiene RPA si no hay alternativa de integración.\"\n\n# 4. n8n: extracción, validación, enrute y notificación, orquestable vía API o sin aprobación compleja.\nelif hay_api or not requiere_aprobacion:\n    plataforma = \"n8n\"\n    motivo = \"Tarea de extracción, validación, normalización, enrute y notificación orquestable vía API.\"\n\n# 5. Power Platform: apoyo operativo simple de baja complejidad (por defecto).\nelse:\n    plataforma = \"Power Platform\"\n    motivo = \"Apoyo operativo simple o captura interna de baja complejidad.\"\n\ndata[\"classification\"] = {\n    \"recommended_platform\": plataforma,\n    \"classification_reason\": motivo,\n}\n\nreturn [{\"json\": data}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        -96
+      ],
+      "id": "6fdf8db7-62f3-4efe-ac0e-246d725affa2",
+      "name": "Clasificación tecnológica"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === PRIORIZACIÓN ===\ndata = _items[0][\"json\"]\n\n# Sistema de puntaje: sumar puntos según factores de riesgo/urgencia.\npuntaje = 0\nfactores = []\n\n# 1. Urgencia regulatoria (factor fuerte)\nif data.get(\"regulatory_urgency\"):\n    puntaje += 3\n    factores.append(\"urgencia regulatoria\")\n\n# 2. Sensibilidad de datos (factor fuerte)\nif data.get(\"uses_sensitive_data\"):\n    puntaje += 2\n    factores.append(\"datos sensibles\")\n\n# 3. Requiere aprobación humana (riesgo legal/reputacional)\nif data.get(\"requires_human_approval\"):\n    puntaje += 2\n    factores.append(\"requiere aprobación humana\")\n\n# 4. Volumen mensual alto\nvolumen = data.get(\"monthly_volume\") or 0\nif volumen >= 300:\n    puntaje += 2\n    factores.append(\"volumen mensual muy alto\")\nelif volumen >= 100:\n    puntaje += 1\n    factores.append(\"volumen mensual moderado\")\n\n# 5. Tiempo manual estimado (cuánto cuesta hacerlo a mano)\ntiempo = data.get(\"estimated_manual_time_minutes\") or 0\nif tiempo >= 20:\n    puntaje += 1\n    factores.append(\"alto tiempo manual\")\n\n# 6. Está sobre RPA hoy (deuda técnica, mayor fragilidad)\nif str(data.get(\"current_solution\", \"\")).lower() == \"rpa\":\n    puntaje += 1\n    factores.append(\"actualmente sobre RPA frágil\")\n\n# 7. No tiene API (más difícil de integrar, más riesgo)\nif not data.get(\"has_api_available\"):\n    puntaje += 1\n    factores.append(\"sin API disponible\")\n\n# 8. Tipo de medida judicial: embargo/retención pesan más\ncase_type = str(data.get(\"enrichment\", {}).get(\"case_type\", \"\")).lower()\nif case_type in (\"embargo\", \"retencion\"):\n    puntaje += 1\n    factores.append(\"medida judicial de impacto (embargo/retención)\")\n\n# --- Traducir puntaje a nivel de prioridad ---\nif puntaje >= 8:\n    prioridad = \"Alta\"\nelif puntaje >= 4:\n    prioridad = \"Media\"\nelse:\n    prioridad = \"Baja\"\n\n# Guardar la priorización\ndata[\"prioritization\"] = {\n    \"priority\": prioridad,\n    \"priority_score\": puntaje,\n    \"priority_factors\": factores,\n}\n\nreturn [{\"json\": data}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        -96
+      ],
+      "id": "6fb7faa3-be8e-43aa-9ee9-de0d489ae5e4",
+      "name": "Priorización"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-2.5-flash",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.5-flash"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "==Eres un analista de cumplimiento. Genera un resumen ejecutivo breve (máximo 3 frases, en español) del siguiente oficio de embargo, mencionando el tipo de caso, la prioridad asignada, la plataforma recomendada y el siguiente paso sugerido. Sé claro y directo, sin repetir datos innecesarios.\n\nDatos del oficio:\n- Caso: {{ $json.case_id }}\n- Tipo: {{ $json.enrichment.case_type }}\n- Jurisdicción: {{ $json.enrichment.jurisdiction }}\n- Cliente/Proceso: {{ $json.process_name }}\n- Descripción: {{ $json.description }}\n- Plataforma recomendada: {{ $json.classification.recommended_platform }}\n- Razón clasificación: {{ $json.classification.classification_reason }}\n- Prioridad: {{ $json.prioritization.priority }}\n- Factores de prioridad: {{ $json.prioritization.priority_factors }}\n- Responsable sugerido: {{ $json.enrichment.recommended_owner }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        1248,
+        -96
+      ],
+      "id": "a3426d5c-d1b2-456d-8620-08432e16b493",
+      "name": "Generar Resumen (Gemini)",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "I9LrGOhxraa2wtJM",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1376,
+        128
+      ],
+      "id": "33daf0b4-0641-47fb-ab37-8653b73b3cc5",
+      "name": "Integrar resumen a Json"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === CONSTRUIR EL JSON FINAL ESTRUCTURADO ===\ndata = _items[0][\"json\"]\n\n# 1. Extraer el resumen de la estructura de Gemini y dejarlo limpio\nresumen = \"\"\ntry:\n    resumen = data[\"content\"][\"parts\"][0][\"text\"]\nexcept (KeyError, IndexError, TypeError):\n    resumen = \"Resumen no disponible.\"\n\n# 2. Quitar los campos crudos de Gemini que no queremos en la salida\nfor campo in [\"content\", \"finishReason\", \"index\", \"role\"]:\n    data.pop(campo, None)\n\n# 3. Armar el JSON final ordenado, según el ejemplo de salida (sección 10)\nsalida = {\n    \"case_id\": data.get(\"case_id\"),\n    \"status\": \"received\",\n    \"valid\": data.get(\"validation\", {}).get(\"valid\", False),\n    \"recommended_platform\": data.get(\"classification\", {}).get(\"recommended_platform\"),\n    \"priority\": data.get(\"prioritization\", {}).get(\"priority\"),\n    \"case_type\": data.get(\"enrichment\", {}).get(\"case_type\"),\n    \"jurisdiction\": data.get(\"enrichment\", {}).get(\"jurisdiction\"),\n    \"recommended_owner\": data.get(\"enrichment\", {}).get(\"recommended_owner\"),\n    \"summary\": resumen,\n    \"priority_reason\": data.get(\"enrichment\", {}).get(\"priority_reason\"),\n    \"priority_score\": data.get(\"prioritization\", {}).get(\"priority_score\"),\n    \"priority_factors\": data.get(\"prioritization\", {}).get(\"priority_factors\", []),\n    \"missing_fields\": data.get(\"validation\", {}).get(\"missing_fields\", []),\n    \"next_step\": \"Registrar caso, validar anexos y escalar a revisión humana\",\n    \"timestamp\": \"PENDIENTE_TIMESTAMP\",\n}\n\nreturn [{\"json\": salida}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        128
+      ],
+      "id": "e6c4b1a8-f23b-4653-8ef5-193136e6c102",
+      "name": "Construir Json Final"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === RESPUESTA AUTOMÁTICA AL SOLICITANTE ===\ndata = _items[0][\"json\"]\n\ncase_id = data.get(\"case_id\", \"N/D\")\nplataforma = data.get(\"recommended_platform\", \"N/D\")\nprioridad = data.get(\"priority\", \"N/D\")\nsiguiente = data.get(\"next_step\", \"N/D\")\n\n# --- Advertencias ---\nadvertencias = []\n\n# Advertir si faltan datos mínimos\nfaltantes = data.get(\"missing_fields\", [])\nif faltantes:\n    advertencias.append(\"Faltan datos mínimos: \" + \", \".join(faltantes) + \".\")\n\n\n# --- Construir el mensaje ---\nmensaje = (\n    \"Estimado(a) solicitante,\\n\\n\"\n    \"Confirmamos la recepción de su oficio \" + str(case_id) + \".\\n\\n\"\n    \"Resultado del análisis automático:\\n\"\n    \"- Solución recomendada: \" + str(plataforma) + \"\\n\"\n    \"- Prioridad asignada: \" + str(prioridad) + \"\\n\"\n    \"- Siguiente paso: \" + str(siguiente) + \"\\n\"\n)\n\nif advertencias:\n    mensaje += \"\\nAdvertencias:\\n- \" + \"\\n- \".join(advertencias) + \"\\n\"\n\nmensaje += \"\\nEste es un acuse automático. El caso ha quedado registrado para seguimiento.\"\n\n# Guardamos el mensaje junto al caso\ndata[\"acknowledgement_message\"] = mensaje\n\nreturn [{\"json\": data}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        128
+      ],
+      "id": "0b4832cf-0558-4574-a9c5-0b58f63704fe",
+      "name": "Respuesta al solicitante"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "3fd3576c-435d-4181-b87e-36cd6c848a0a",
+              "name": "timestamp",
+              "value": "={{ $now.toISO().trim() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1792,
+        128
+      ],
+      "id": "fb3178f0-d279-4815-baf1-9601e42aa1c6",
+      "name": "timestamp"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === LOG DE TRAZABILIDAD ===\ndata = _items[0][\"json\"]\n\n# registro de trazabilidad de la ejecución\nlog = {\n    \"log_case_id\": data.get(\"case_id\"),\n    \"log_timestamp\": data.get(\"timestamp\"),\n    \"log_status\": data.get(\"status\"),\n    \"log_valid\": data.get(\"valid\"),\n    \"log_recommended_platform\": data.get(\"recommended_platform\"),\n    \"log_priority\": data.get(\"priority\"),\n    \"log_priority_score\": data.get(\"priority_score\"),\n    \"log_owner\": data.get(\"recommended_owner\"),\n    \"log_missing_fields\": data.get(\"missing_fields\", []),\n    \"log_event\": \"Caso procesado y enrutado correctamente\",\n}\n\n# Adjuntar el log al caso, en un bloque de trazabilidad\ndata[\"trace_log\"] = log\n\nreturn [{\"json\": data}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2208,
+        128
+      ],
+      "id": "3975f523-b3ad-48f7-bac3-eb67e9696981",
+      "name": "Log Trazabilidad"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === RESPUESTA PARA CASO INCOMPLETO ===\ndata = _items[0][\"json\"]\n\nfaltantes = data.get(\"validation\", {}).get(\"missing_fields\", [])\ncase_id = data.get(\"case_id\", \"N/D\")\n\nmensaje = (\n    \"Estimado(a) solicitante,\\n\\n\"\n    \"Su oficio \" + str(case_id) + \" NO pudo ser procesado porque falta \"\n    \"información mínima obligatoria.\\n\\n\"\n    \"Campos faltantes:\\n- \" + \"\\n- \".join(faltantes) + \"\\n\\n\"\n    \"Por favor complete estos datos y reenvíe el oficio.\"\n)\n\n# Salida  para el caso rechazado\nsalida = {\n    \"case_id\": case_id,\n    \"status\": \"rejected\",\n    \"valid\": False,\n    \"missing_fields\": faltantes,\n    \"next_step\": \"Completar los campos faltantes y reenviar el oficio\",\n    \"acknowledgement_message\": mensaje,\n}\n\nreturn [{\"json\": salida}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        96
+      ],
+      "id": "668da93b-1144-4d53-a73f-bc28b6fa99df",
+      "name": "Respuesta Incompleta"
+    },
+    {
+      "parameters": {
+        "serverTransport": "sse",
+        "endpointUrl": "https://headstand-ripeness-enclosure.ngrok-free.dev/sse",
+        "tool": {
+          "__rl": true,
+          "value": "get_classification_criteria",
+          "mode": "list",
+          "cachedResultName": "get_classification_criteria"
+        },
+        "parameters": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        368
+      ],
+      "id": "c8d17a56-7ea3-4e2d-917b-5915e9308a68",
+      "name": "MCP Client"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2112,
+        368
+      ],
+      "id": "095b8543-5867-4c55-9125-e726368992bf",
+      "name": "Unir criterios MCP"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# === ADJUNTAR CRITERIOS DEL MCP AL RESULTADO ===\n# El Merge combina el caso Input 1 con los criterios del MCP (Input 2).\n# Como vienen en items separados, los recogemos y unimos.\n\nitems = _items\n\n# Buscar el caso (el item que tiene 'case_id') y los criterios (el que tiene 'content')\ncaso = None\ncriterios_mcp = None\n\nfor it in items:\n    j = it[\"json\"]\n    if \"case_id\" in j:\n        caso = j\n    if \"content\" in j:\n        # Extraer los criterios del formato MCP\n        try:\n            criterios_mcp = j[\"content\"][0][\"text\"]\n        except (KeyError, IndexError, TypeError):\n            criterios_mcp = j.get(\"content\")\n\n# Si el caso no se encontró, usar el primer item como fallback\nif caso is None:\n    caso = items[0][\"json\"]\n\n# Adjuntar los criterios del MCP como evidencia de la fuente externa\ncaso[\"mcp_classification_criteria\"] = criterios_mcp\ncaso[\"mcp_source\"] = \"Criterios obtenidos en tiempo real desde servidor MCP externo\"\n\nreturn [{\"json\": caso}]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        368
+      ],
+      "id": "16206781-d5e8-48a2-ae6f-0ff9197d4a25",
+      "name": "Adjuntar Criterios MCP"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verificar campos Json ",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "MCP Client",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar campos Json ": {
+      "main": [
+        [
+          {
+            "node": "Si Json está completo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Si Json está completo": {
+      "main": [
+        [
+          {
+            "node": "Enrequecimiento del caso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respuesta Incompleta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrequecimiento del caso": {
+      "main": [
+        [
+          {
+            "node": "Clasificación tecnológica",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificación tecnológica": {
+      "main": [
+        [
+          {
+            "node": "Priorización",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Priorización": {
+      "main": [
+        [
+          {
+            "node": "Generar Resumen (Gemini)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Integrar resumen a Json",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar Resumen (Gemini)": {
+      "main": [
+        [
+          {
+            "node": "Integrar resumen a Json",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Integrar resumen a Json": {
+      "main": [
+        [
+          {
+            "node": "Construir Json Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construir Json Final": {
+      "main": [
+        [
+          {
+            "node": "timestamp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "timestamp": {
+      "main": [
+        [
+          {
+            "node": "Respuesta al solicitante",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respuesta al solicitante": {
+      "main": [
+        [
+          {
+            "node": "Log Trazabilidad",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP Client": {
+      "main": [
+        [
+          {
+            "node": "Unir criterios MCP",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Log Trazabilidad": {
+      "main": [
+        [
+          {
+            "node": "Unir criterios MCP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unir criterios MCP": {
+      "main": [
+        [
+          {
+            "node": "Adjuntar Criterios MCP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "cBnU6JiyD8q7JxFn",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "cde4fdb1-2a6b-4613-acfe-08967a489849",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "7ed99981de0f98a25e6b7398256acefda7c5d834300494d29fc75c64d502335b"
+  },
+  "nodeGroups": [],
+  "id": "yjYAQFBMB3lodoit",
+  "tags": []
+}
